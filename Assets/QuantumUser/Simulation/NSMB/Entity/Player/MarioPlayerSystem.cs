@@ -1489,6 +1489,7 @@ namespace Quantum {
             switch (mario->CurrentPowerupState) {
             case PowerupState.IceFlower:
             case PowerupState.FireFlower:
+            case PowerupState.BoomerangFlower:
             case PowerupState.HammerSuit: {
 
                 if (mario->ProjectileDelayFrames > 0 || mario->IsWallsliding || (mario->JumpState == JumpState.TripleJump && !physicsObject->IsTouchingGround)
@@ -1496,15 +1497,24 @@ namespace Quantum {
                     return;
                 }
 
+                var powerupAsset = QuantumUtils.FindPowerupAsset(f, mario->CurrentPowerupState);
+                if (powerupAsset == null) {
+                    return;
+                }
+                var projectileAsset = f.FindAsset(powerupAsset.ProjectileAsset);
+                if (projectileAsset == null) {
+                    return;
+                }
+
                 byte activeProjectiles = mario->CurrentProjectiles;
-                if (activeProjectiles >= physics.MaxProjecitles) {
+                if (activeProjectiles >= projectileAsset.MaxProjectiles) {
                     return;
                 }
 
                 if (activeProjectiles < 2) {
                     // Always allow if < 2
                     mario->CurrentVolley = (byte) (activeProjectiles + 1);
-                } else if (mario->CurrentVolley < physics.ProjectileVolleySize) {
+                } else if (mario->CurrentVolley < projectileAsset.ProjectileVolleySize) {
                     // Allow in this volley
                     mario->CurrentVolley++;
                 } else {
@@ -1513,12 +1523,14 @@ namespace Quantum {
                 }
 
                 mario->CurrentProjectiles++;
-                mario->ProjectileDelayFrames = physics.ProjectileDelayFrames;
-                mario->ProjectileVolleyFrames = physics.ProjectileVolleyFrames;
+                mario->ProjectileDelayFrames = projectileAsset.ProjectileDelayFrames;
+                mario->ProjectileVolleyFrames = projectileAsset.ProjectileVolleyFrames;
 
                 Projectile* projectile;
                 if (mario->CurrentPowerupState == PowerupState.HammerSuit) {
                     projectile = ShootHammerProjectile(f, ref filter, physics);
+                } else if (mario->CurrentPowerupState == PowerupState.BoomerangFlower) {
+                    projectile = ShootBoomerangProjectile(f, ref filter, physics);
                 } else {
                     projectile = ShootNormalProjectile(f, ref filter, physics);
                 }
@@ -1600,6 +1612,18 @@ namespace Quantum {
             return projectile;
         }
 
+        private Projectile* ShootBoomerangProjectile(Frame f, ref Filter filter, MarioPlayerPhysicsInfo physics) {
+            var mario = filter.MarioPlayer;
+            var physicsObject = filter.PhysicsObject;
+
+            FPVector2 spawnPos = filter.Transform->Position + new FPVector2(mario->FacingRight ? FP._0_25 : -FP._0_25, FP._0_50);
+
+            EntityRef newEntity = f.Create(f.SimulationConfig.BoomerangPrototype);
+
+            var projectile = f.Unsafe.GetPointer<Projectile>(newEntity);
+            projectile->InitializeBoomerang(f, newEntity, filter.Entity, spawnPos, mario->FacingRight);
+            return projectile;
+        }
 
         private Projectile* ShootNormalProjectile(Frame f, ref Filter filter, MarioPlayerPhysicsInfo physics) {
             var mario = filter.MarioPlayer;
@@ -2157,32 +2181,38 @@ namespace Quantum {
             }
 
             var projectile = f.Unsafe.GetPointer<Projectile>(projectileEntity);
+            var projectilePhysics = f.Unsafe.GetPointer<PhysicsObject>(projectileEntity);
             if (projectile->Owner == marioEntity) {
                 return;
             }
 
             var mario = f.Unsafe.GetPointer<MarioPlayer>(marioEntity);
             var marioPhysics = f.Unsafe.GetPointer<PhysicsObject>(marioEntity);
-            var projectileAsset = f.FindAsset(projectile->Asset);
+            var asset = f.FindAsset(projectile->Asset);
+            var state = mario->CurrentPowerupState;
 
             bool dropStars = false;
+
+            var hammerXBoomerang = mario->IsCrouching && marioPhysics->IsTouchingGround && state == PowerupState.HammerSuit && asset.Effect == ProjectileEffectType.Boomerang;
 
             // Mario is "damageable" when he's...
             // not in knockback, not Mega
             // regular damageable checks (iframes is 0, not starman invincible)
             // not in a powerUP transition while mini (specifically)
             // Mario is in his Blue Shell and projectile doesn't affect blue Shell
+            // Mario is crouched and grounded with Hammer Suit and projectile isn't a boomerang or fireball
             // Team attack allows him to get hit
             bool damageable = !mario->IsInKnockback
-                && mario->CurrentPowerupState != PowerupState.MegaMushroom
-                && (mario->IsDamageable(f) || (mario->TryGetCurrentPowerTransition(f, out _) && mario->CurrentPowerupState == PowerupState.MiniMushroom))
-                && !((mario->IsCrouchedInShell || mario->IsInShell) && projectileAsset.DoesntEffectBlueShell)
+                && state != PowerupState.MegaMushroom
+                && (mario->IsDamageable(f) || (mario->TryGetCurrentPowerTransition(f, out _) && state == PowerupState.MiniMushroom))
+                && !((mario->IsCrouchedInShell || mario->IsInShell) && asset.DoesntEffectBlueShell)
+                && !hammerXBoomerang
                 && mario->CheckTeamAttack(f, projectile->Owner, out dropStars);
 
             if (damageable) {
                 bool didKnockback = false;
-                switch (projectileAsset.Effect) {
-                case ProjectileEffectType.KillEnemiesAndSoftKnockbackPlayers:
+                switch (asset.Effect) {
+                case ProjectileEffectType.Hammer:
                 case ProjectileEffectType.Fire:
                     // drop stars, that means opponent's projectile
                     // this checks if opponent projectile and we're mini, if so do the thing
@@ -2220,7 +2250,17 @@ namespace Quantum {
                 }
             }
 
-            if (damageable || projectileAsset.DestroyOnHit || ((mario->IsCrouchedInShell || mario->IsInShell) && projectileAsset.DoesntEffectBlueShell)) {
+            if (damageable || asset.DestroyOnHit || ((mario->IsCrouchedInShell || mario->IsInShell) && asset.DoesntEffectBlueShell) || hammerXBoomerang) {
+                if (hammerXBoomerang) {
+                    // Fly
+                    var physicsObject = f.Unsafe.GetPointer<PhysicsObject>(projectileEntity);
+                    projectile->Speed *= Constants._0_85;
+                    physicsObject->Gravity *= Constants._0_85;
+                    physicsObject->Velocity.Y = projectile->Speed;
+
+                    f.Events.EnemyPierced(marioEntity);
+                }
+
                 f.Signals.OnProjectileHitEntity(projectileEntity, marioEntity);
             }
         }
