@@ -1,0 +1,70 @@
+﻿using Quantum.Core;
+using System.Collections.Generic;
+
+namespace Quantum {
+    public static partial class DeterministicSystemSetup {
+        static partial void AddSystemsUser(ICollection<SystemBase> systems, RuntimeConfig gameConfig, SimulationConfig simulationConfig, SystemsConfig systemsConfig) {
+            // The system collection is already filled with systems coming from the SystemsConfig.
+            // Add or remove systems to the collection: systems.Add(new SystemFoo());
+
+            // Remove the default systems
+            systems.Clear();
+            systems.Add(new PlayerConnectedSystem());
+            systems.Add(new MvLCullingSystem());
+            systems.Add(new GameLogicSystem());
+            systems.Add(
+                new StartDisabledSystemGroup(
+                    new PrePhysicsObjectSystem(),
+                    new InteractionPhysicsQuerySystem(),
+                    new GenericMoverSystem(),
+                    new SpinnerSystem(),
+                    new DonutBlockSystem(),
+                    new MovingPlatformPhysicsQuerySystem(),
+                    new PhysicsSystem2D(),
+                    new EnemySystem(),
+                    new InteractionSystem(),
+                    new MovingPlatformSystem(),
+                    new PhysicsObjectSystem(),
+                    new GoombaSystem(),
+                    new KoopaSystem(),
+                    new BobombSystem(),
+                    new PiranhaPlantSystem(),
+                    new BulletBillLauncherSystem(),
+                    new BulletBillSystem(),
+                    new BooSystem(),
+                    new FireSnakeSystem(),
+                    new ProjectileSystem(),
+                    new CoinItemSystem(),
+                    new PowerupSystem(),
+                    new BlockBumpSystem(),
+                    new BreakableObjectSystem(),
+                    new MarioPlayerSystem(),
+                    new CoinSystem(),
+                    new GoldBlockSystem(),
+                    new WrappingObjectSystem(),
+                    new BigStarSystem(),
+                    new ObjectiveCoinSystem(),
+                    new HoldableObjectSystem(),
+                    new IceBlockSystem(),
+                    new CameraSystem(),
+                    new LiquidSystem(),
+                    new MarioBrosPlatformSystem(),
+                    new EnterablePipeSystem(),
+                    new InvisibleBlockSystem()
+                    // new BetterPhysicsObjectSystem()
+                )
+            );
+            systems.Add(new StageSystem());
+            systems.Add(new EntityPrototypeSystem());
+
+            if (!gameConfig.IsRealGame) {
+                var debugSystem = DebugCommand.CreateSystem();
+                if (debugSystem != null) {
+                    systems.Add(debugSystem);
+                }
+
+                systems.Add(new MvLDebugSystem());
+            }
+        }
+    }
+}

@@ -1,0 +1,19 @@
+#define FireSnakeSegments 5
+#define FireSnakeSegmentPositionBufferSize 5
+
+component FireSnake {
+	AssetRef<EntityPrototype> SegmentPrototype;
+	FP JumpHorizontalSpeed;
+	FP JumpHeightLow;
+	FP JumpHeightHigh;
+	[ExcludeFromPrototype] array<EntityRef>[FireSnakeSegments] Segments;
+	[ExcludeFromPrototype] byte JumpTimer;
+}
+
+component FireSnakeSegment {
+	[ExcludeFromPrototype] EntityRef FireSnake;
+	[ExcludeFromPrototype] EntityRef Parent;
+	[ExcludeFromPrototype] array<FPVector2>[FireSnakeSegmentPositionBufferSize] PositionBuffer;
+	[ExcludeFromPrototype] int SpawnTick;
+	[ExcludeFromPrototype] byte Index;
+}

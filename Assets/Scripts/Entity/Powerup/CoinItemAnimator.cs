@@ -1,0 +1,167 @@
+using NSMB.Utilities;
+using NSMB.Utilities.Extensions;
+using Quantum;
+using UnityEngine;
+using static NSMB.Utilities.QuantumViewUtils;
+
+namespace NSMB.Entities.CoinItems {
+    public unsafe class CoinItemAnimator : QuantumEntityViewComponent {
+
+        //---Serialized
+        [SerializeField] private Transform graphicsRoot, moveBehindBlocksRoot;
+        [SerializeField] private new Renderer renderer;
+        [SerializeField] private Animator childAnimator;
+        [SerializeField] private Animation childAnimation;
+        [SerializeField] private float scaleRate = 0.1333f, scaleSize = 0.3f;
+        [SerializeField] private AudioSource sfx;
+        [SerializeField] private ParticleSystem koopaSpawnParticles;
+
+        //---Private
+        private int originalSortingOrder;
+        private bool inSpawnAnimation;
+        private MaterialPropertyBlock mpb;
+
+        public void OnValidate() {
+            this.SetIfNull(ref renderer, UnityExtensions.GetComponentType.Children);
+            this.SetIfNull(ref childAnimator, UnityExtensions.GetComponentType.Children);
+            this.SetIfNull(ref childAnimation, UnityExtensions.GetComponentType.Children);
+            this.SetIfNull(ref sfx);
+        }
+
+        public void Start() {
+            QuantumEvent.Subscribe<EventCoinItemBecameActive>(this, OnCoinItemBecameActive);
+            QuantumEvent.Subscribe<EventGameEnded>(this, OnGameEnded);
+        }
+
+        public override void OnActivate(Frame f) {
+            if (!f.Unsafe.TryGetPointer(EntityRef, out CoinItem* coinItem)) {
+                return;
+            }
+            var scriptable = QuantumUnityDB.GetGlobalAsset(coinItem->Scriptable);
+
+            originalSortingOrder = renderer.sortingOrder;
+            renderer.GetPropertyBlock(mpb = new());
+
+            if (coinItem->SpawnReason == PowerupSpawnReason.BlueKoopa && koopaSpawnParticles) {
+                koopaSpawnParticles.Play();
+            }
+
+            if (f.Exists(coinItem->ParentMarioPlayer)) {
+                // Following mario
+                renderer.sortingOrder = 15;
+                if (childAnimator) {
+                    childAnimator.enabled = false;
+                }
+            } else if (coinItem->BlockSpawn) {
+                // Block spawn
+                if (moveBehindBlocksRoot) {
+                    Vector3 pos = moveBehindBlocksRoot.localPosition;
+                    pos.z = 1;
+                    moveBehindBlocksRoot.localPosition = pos;
+                }
+
+                renderer.sortingOrder = -1000;
+                if (!IsReplayFastForwarding) {
+                    sfx.PlayOneShot(scriptable.BlockSpawnSoundEffect);
+                }
+                if (childAnimation) {
+                    childAnimation.Play();
+                }
+            } else if (coinItem->LaunchSpawn) {
+                // Spawn with velocity
+                if (moveBehindBlocksRoot) {
+                    Vector3 pos = moveBehindBlocksRoot.localPosition;
+                    pos.z = 1;
+                    moveBehindBlocksRoot.localPosition = pos;
+                }
+
+                renderer.sortingOrder = -1000;
+                if (!IsReplayFastForwarding) {
+                    sfx.PlayOneShot(scriptable.BlockSpawnSoundEffect);
+                }
+            } else {
+                // Spawned by any other means (blue koopa, usually.)
+                if (!IsReplayFastForwarding) {
+                    sfx.PlayOneShot(scriptable.BlockSpawnSoundEffect);
+                }
+                if (childAnimation) {
+                    childAnimation.Play();
+                }
+                renderer.sortingOrder = originalSortingOrder;
+            }
+        }
+
+        public override void OnUpdateView() {
+            Frame f = PredictedFrame;
+            if (!f.Unsafe.TryGetPointer(EntityRef, out CoinItem* coinItem)) {
+                return;
+            }
+
+            if (childAnimator) {
+                childAnimator.SetBool("blockSpawn", coinItem->BlockSpawn && coinItem->SpawnAnimationFrames > 0);
+            }
+            
+            if (f.Unsafe.TryGetPointer(EntityRef, out PhysicsObject* physicsObject)) {
+                if (childAnimator) {
+                    childAnimator.SetBool("onGround", physicsObject->IsTouchingGround);
+                }
+            }
+
+            HandleSpawningAnimation(f, coinItem);
+            HandleDespawningBlinking(f, coinItem);
+        }
+        
+        private void HandleSpawningAnimation(Frame f, CoinItem* coinItem) {
+            if (f.Exists(coinItem->ParentMarioPlayer) && coinItem->SpawnAnimationFrames > 0) {
+                // Following player
+                float timeRemaining = coinItem->SpawnAnimationFrames / 60f;
+                float adjustment = Mathf.PingPong(timeRemaining, scaleRate) / scaleRate * scaleSize;
+                graphicsRoot.localScale = Vector3.one * (1 + adjustment);
+
+                if (!inSpawnAnimation) {
+                    mpb.SetFloat("WaveEnabled", 0);
+                    renderer.SetPropertyBlock(mpb);
+                    inSpawnAnimation = true;
+                }
+            } else if (inSpawnAnimation) {
+                renderer.transform.localScale = Vector3.one;
+                inSpawnAnimation = false;
+                renderer.sortingOrder = 15;
+
+                if (moveBehindBlocksRoot) {
+                    Vector3 pos = moveBehindBlocksRoot.localPosition;
+                    pos.z = 0;
+                    moveBehindBlocksRoot.localPosition = pos;
+                }
+
+                mpb.SetFloat("WaveEnabled", 1);
+                renderer.SetPropertyBlock(mpb);
+            }
+        }
+
+        private void HandleDespawningBlinking(Frame f, CoinItem* coinItem) {
+            renderer.enabled = Utils.Blink((float) coinItem->Lifetime / f.UpdateRate, blinkStartTime: 3f, blinksPerSecond: 4f);
+        }
+
+        private void OnCoinItemBecameActive(EventCoinItemBecameActive e) {
+            if (e.Entity != EntityRef) {
+                return;
+            }
+
+            renderer.sortingOrder = originalSortingOrder;
+            renderer.gameObject.transform.localScale = Vector3.one;
+            if (childAnimator) {
+                childAnimator.enabled = true;
+            }
+        }
+
+        private void OnGameEnded(EventGameEnded e) {
+            if (childAnimator) {
+                childAnimator.enabled = false;
+            }
+            if (childAnimation) {
+                childAnimation.enabled = false;
+            }
+        }
+    }
+}

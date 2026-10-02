@@ -1,0 +1,16 @@
+namespace Quantum
+{
+    using Photon.Deterministic;
+
+    public unsafe class #SCRIPTNAME# : SystemMainThreadFilter<#SCRIPTNAME#.Filter>
+    {
+        public override void Update(Frame frame, ref Filter filter)
+        {
+        }
+
+        public struct Filter
+        {
+            public EntityRef Entity;
+        }
+    }
+}

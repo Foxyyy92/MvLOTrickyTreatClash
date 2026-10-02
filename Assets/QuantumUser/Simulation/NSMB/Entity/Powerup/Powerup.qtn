@@ -1,0 +1,33 @@
+component Powerup {
+	bool FacingRight;
+
+	[ExcludeFromPrototype] FPVector2 AnimationCurveOrigin;
+	[ExcludeFromPrototype] FP AnimationCurveTimer;
+}
+
+signal OnMarioPlayerCollectedPowerup(EntityRef mario, EntityRef powerup);
+
+enum PowerupState : Byte {
+    NoPowerup,
+    MiniMushroom,
+    Mushroom,
+    FireFlower,
+    IceFlower,
+    PropellerMushroom,
+    BlueShell,
+	HammerSuit,
+    MegaMushroom
+}
+
+enum PowerupSpawnReason : Byte {
+	PowerupBlock,
+	Coins,
+	BlueKoopa,
+	Other
+}
+
+enum PowerupReserveResult : Byte {
+	KeepOldReserveNew,
+    CollectNewReserveOld,
+    CollectNewIgnoreOld,
+}

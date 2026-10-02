@@ -1,0 +1,151 @@
+#define MaxPlayers 10
+#pragma max_players MaxPlayers
+
+global {
+	GameRules Rules;	
+	GameState GameState;
+	int StartFrame;
+	int TotalGamesPlayed;
+
+	bool IsStartGameCountdownActive;
+	ushort GameStartFrames;
+	ushort PlayerLoadFrames;
+	ushort AutomaticStageRefreshInterval;
+	ushort AutomaticStageRefreshTimer;
+
+	array<PlayerInformation>[MaxPlayers] PlayerInfo;
+	byte RealPlayers;
+	byte TotalMarios; // Different from RealPlayers- count of all Marios at game start, including ones baked into the scene.
+
+	AssetRef<Map> PreviousStage;
+	int WinningTeam;
+	bool HasWinner;
+}
+
+struct PlayerInformation {
+	PlayerRef PlayerRef;
+	QString<48> Nickname;
+	QStringUtf8<48> NicknameColor;
+	byte Team;
+	AssetRef<CharacterAsset> Character;
+	bool Disconnected;
+	bool Disqualified;
+}
+
+enum StageChooseMode : Byte {
+	Choose,
+	Random
+}
+
+struct GameRules {
+	AssetRef<Map> Stage;
+	StageChooseMode ChooseMode;
+	hash_set<AssetRef<Map>> RandomDisabledStages;
+
+	AssetRef<GamemodeAsset> Gamemode;
+	int StarsToWin;
+	int CoinsForPowerup;
+	int Lives;
+	int TimerMinutes;
+	bool TeamsEnabled;
+	bool CustomPowerupsEnabled;
+	bool DrawOnTimeUp;
+
+	// these are advanced rules
+	TeamAttackOptions TeamAttack;
+	int StarFountain; // divide this number by 100, options 0, 1/4, 2/4, 3/4, ALL
+	int CoinDeathPenalty; // divide this number by 100. 0 for NONE, 100 for ALL
+	dictionary<AssetRef<CoinItemAsset>, FP> CoinItemCustomSpawnWeights;
+}
+
+enum TeamAttackOptions : Byte {
+	None,
+	KnockbackOnly,
+	Full
+}
+
+enum GameState : Byte {
+    PreGameRoom,
+    WaitingForPlayers,
+    Starting,
+    Playing,
+    Ended
+}
+
+signal OnLoadingComplete();
+signal OnGameStarting();
+signal OnGameEnding(int winningTeam, bool hasWinner);
+signal OnReturnToRoom();
+
+synced event GameStateChanged {
+	GameState NewState;
+}
+
+synced event PlayerAdded {
+	PlayerRef Player;
+}
+
+synced event PlayerRemoved {
+	PlayerRef Player;
+}
+
+event PlayerDataChanged {
+	PlayerRef Player;
+}
+
+synced event StartingCountdownChanged {
+	bool IsGameStarting;
+}
+
+event CountdownTick {
+	int SecondsRemaining;
+}
+
+synced event HostChanged {
+	PlayerRef NewHost;
+}
+
+synced event RulesChanged {
+	bool GamemodeChanged;
+	bool MapChanged;
+}
+
+synced event RandomStageToggled {
+	AssetRef<Map> Stage;
+	bool IsDisabled;
+}
+
+synced event CoinItemCustomSpawnWeightChanged {
+	AssetRef<CoinItemAsset> CoinItem;
+	FP NewWeight;
+}
+
+synced event HostCloseRulesPanel {
+
+}
+
+synced event PlayerLoaded {
+	PlayerRef Player;
+}
+
+synced event RecordingStarted {
+
+}
+
+synced event GameStarted {
+
+}
+
+synced event GameEnded {
+	bool EndedByHost;
+	int WinningTeam;
+	bool HasWinner;
+}
+
+event StartGameEndFade {
+
+}
+
+synced event StageAutoRefresh {
+
+}

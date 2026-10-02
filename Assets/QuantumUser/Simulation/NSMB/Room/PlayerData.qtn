@@ -1,0 +1,22 @@
+component PlayerData {
+	PlayerRef PlayerRef;
+	bool IsLoaded;
+
+	AssetRef<CharacterAsset> Character;
+	AssetRef<PaletteSet> Palette;
+	byte RequestedTeam;
+	bool IsSpectator;
+	bool ManualSpectator;
+	bool VotedToContinue;
+
+	bool IsTeamLocked;
+
+	int Wins;
+	byte RealTeam;
+	int LastChatMessage;
+	bool IsReady;
+	bool IsInSettings;
+	int JoinTick;
+	int Ping;
+}
+

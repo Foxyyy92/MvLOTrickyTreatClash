@@ -1,0 +1,538 @@
+using NSMB.Networking;
+using NSMB.Replay;
+using NSMB.Utilities;
+using NSMB.Utilities.Extensions;
+using Photon.Client;
+using Photon.Deterministic;
+using Photon.Realtime;
+using Quantum;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using UnityEngine;
+using UnityEngine.Networking;
+using static NSMB.Utilities.NetworkUtils;
+
+namespace NSMB.Networking {
+    public class NetworkHandler : Singleton<NetworkHandler>, IMatchmakingCallbacks, IConnectionCallbacks {
+
+        //---Events
+        public static event Action<ClientState, ClientState> StateChanged;
+        public static event Action<string, bool> OnError;
+
+        //---Static Variables
+        public static readonly string RoomIdValidChars = "BCDFGHJKLMNPRQSTVWXYZ";
+        public static readonly int RoomIdLength = 4;
+        private static Dictionary<short, string> RealtimeErrorCodeNames;
+
+        //---Static Properties
+        public static RealtimeClient Client => Instance ? Instance.realtimeClient : null;
+        public static long? Ping => Client?.RealtimePeer.Stats.RoundtripTime;
+        public static QuantumRunner Runner { get; set; }
+        public static QuantumGame Game => Runner?.Game ?? QuantumRunner.DefaultGame;
+        public static IEnumerable<Region> Regions => Client?.RegionHandler?.EnabledRegions?.OrderBy(r => r.Code);
+        public static string Region => Client?.CurrentRegion ?? Instance.lastRegion;
+
+        //---Serialized Variables
+        [SerializeField] private BuildIdentifier buildIdentifierAsset;
+
+        //---Private Variables
+        private RealtimeClient realtimeClient;
+        private string lastRegion;
+        private Coroutine pingUpdateCoroutine;
+
+        public void Awake() {
+            RealtimeErrorCodeNames ??= typeof(ErrorCode).GetFields(BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(int))
+                .ToDictionary(f => (short) (int) f.GetRawConstantValue(), f => f.Name);
+
+            Set(this);
+            StateChanged += OnClientStateChanged;
+
+            realtimeClient = new();
+            realtimeClient.StateChanged += (ClientState oldState, ClientState newState) => {
+                StateChanged?.Invoke(oldState, newState);
+            };
+            realtimeClient.AddCallbackTarget(this);
+            
+            QuantumCallback.Subscribe<CallbackGameStarted>(this, OnGameStarted);
+            QuantumCallback.Subscribe<CallbackPluginDisconnect>(this, OnPluginDisconnect);
+            QuantumCallback.Subscribe<CallbackChecksumError>(this, OnChecksumError);
+            QuantumCallback.Subscribe<CallbackLocalPlayerAddConfirmed>(this, OnLocalPlayerAddConfirmed);
+            QuantumCallback.Subscribe<CallbackLocalPlayerAddFailed>(this, OnLocalPlayerAddFailed);
+            QuantumEvent.Subscribe<EventHostChanged>(this, OnHostChanged);
+            QuantumEvent.Subscribe<EventGameStateChanged>(this, OnGameStateChanged);
+            QuantumEvent.Subscribe<EventPlayerAdded>(this, OnPlayerAdded);
+            QuantumEvent.Subscribe<EventPlayerRemoved>(this, OnPlayerRemoved);
+            QuantumEvent.Subscribe<EventRulesChanged>(this, OnRulesChanged);
+            QuantumEvent.Subscribe<EventPlayerKickedFromRoom>(this, OnPlayerKickedFromRoom);
+        }
+
+        public void Update() {
+            Client?.Service();
+        }
+
+        public void OnDestroy() {
+            StateChanged -= OnClientStateChanged;
+            realtimeClient.RemoveCallbackTarget(this);
+        }
+
+        public void OnClientStateChanged(ClientState oldState, ClientState newState) {
+            // Jesus christ
+            GlobalController.Instance.connecting.SetActive(
+                newState is ClientState.Authenticating
+                    or ClientState.ConnectWithFallbackProtocol
+                    or ClientState.ConnectingToNameServer
+                    or ClientState.ConnectingToMasterServer
+                    or ClientState.ConnectingToGameServer
+                    or ClientState.Disconnecting
+                    or ClientState.DisconnectingFromNameServer
+                    or ClientState.DisconnectingFromMasterServer
+                    or ClientState.DisconnectingFromGameServer
+                    or ClientState.ConnectedToMasterServer // We always join a lobby, so...
+                    or ClientState.Joining
+                    or ClientState.JoiningLobby
+                    or ClientState.Leaving
+                    or ClientState.ConnectedToNameServer // Include this since we can't do anything and will auto-disconnect anyway
+                    || (Client.State == ClientState.Joined && (!Runner || (Runner.Game == null) || Runner.Game.GetLocalPlayers().Count == 0))
+            );
+        }
+
+        public IEnumerator PingUpdateCoroutine() {
+            WaitForSeconds seconds = new(1);
+            CommandUpdatePing pingCommand = new();
+            while (true) {
+                if (Game != null) {
+                    pingCommand.PingMs = (int) Ping.Value;
+                    foreach (int slot in Game.GetLocalPlayerSlots()) {
+                        Game.SendCommand(slot, pingCommand);
+                    }
+                }
+                yield return seconds;
+            }
+        }
+
+        public static Task Disconnect() {
+            return Client.DisconnectAsync();
+        }
+
+        public static async Task<bool> ConnectToRegion(string region) {
+            if (Client == null) {
+                Debug.LogWarning("[Network] RealtimeClient is null, bailing");
+                return false;
+            }
+            if (Runner != null && Runner.IsRunning) {
+                await Runner.ShutdownAsync();
+            }
+
+            StateChanged?.Invoke(ClientState.Disconnected, ClientState.Authenticating);
+            region ??= Instance.lastRegion;
+            Instance.lastRegion = region;
+            Client.AuthValues = await AuthenticationHandler.Authenticate();
+
+            if (Client == null) {
+                Debug.LogWarning("[Network] Client was null after authentication (race condition?), bailing");
+                return false;
+            }
+
+            if (Client.AuthValues == null) {
+                Debug.LogWarning("[Network] Authentication failed, bailing");
+                StateChanged?.Invoke(ClientState.ConnectingToMasterServer, ClientState.Disconnected);
+                return false;
+            }
+
+            if (Client.IsConnected) {
+                await Client.DisconnectAsync();
+            }
+
+            if (region == null) {
+                Debug.Log("[Network] Connecting to the best available region");
+            } else {
+                Debug.Log($"[Network] Connecting to region '{region}'");
+            }
+
+            try {
+                string buildIdentifier = "";
+                if (Instance.buildIdentifierAsset && !string.IsNullOrWhiteSpace(Instance.buildIdentifierAsset.Identifier)) {
+                    buildIdentifier = "-" + Instance.buildIdentifierAsset.Identifier;
+                }
+
+                await Client.ConnectUsingSettingsAsync(new AppSettings {
+                    AppIdQuantum = "6b4b72d0-57c3-4991-96c1-f3f36f9548e5",
+                    AppVersion = GameVersion.Current.ToStringIgnoreHotfix() + buildIdentifier,
+                    EnableLobbyStatistics = true,
+                    AuthMode = AuthModeOption.Auth,
+                    FixedRegion = region,
+                });
+                short response = await Client.JoinLobbyAsync(TypedLobby.Default);
+                if (response == 0) {
+                    Debug.Log($"[Network] Successfully connected to region '{Client.CurrentRegion}'");
+                    Instance.lastRegion = Client.CurrentRegion;
+                } else {
+                    string responseAsString = RealtimeErrorCodeNames.GetValueOrDefault(response, "Unknown Error");
+                    Debug.LogError($"[Network] Failed to join lobby in region '{region ?? "best"}' with error code {response} ({responseAsString})");
+                    return false;
+                }
+
+                return true;
+            } catch (Exception e) {
+                Debug.Log($"[Network] Failed to connect with thrown exception: {e.Message}");
+                Debug.LogError(e);
+                return false;
+            }
+        }
+
+        public static async Task<bool> ConnectToRoomsRegion(string roomId) {
+            int regionIndex = RoomIdValidChars.IndexOf(roomId.ToUpper()[0]);
+            string targetRegion = Regions.ElementAt(regionIndex).Code;
+
+            if (Client.State is ClientState.ConnectedToMasterServer or ClientState.JoinedLobby
+                && Client.CurrentRegion.Equals(targetRegion, StringComparison.InvariantCultureIgnoreCase)) {
+                return true;
+            }
+
+            return await ConnectToRegion(targetRegion);
+        }
+
+        public static async Task<short> CreateRoom(EnterRoomArgs args) {
+            // Create a random room id.
+            StringBuilder idBuilder = new();
+
+            // First char should correspond to region.
+            int index = Regions.IndexOf(r => r.Code.Equals(Region, StringComparison.InvariantCultureIgnoreCase)); // Dirty linq hack
+            idBuilder.Append(RoomIdValidChars[index >= 0 ? index : 0]);
+
+            // Fill rest of the string with random chars
+            UnityEngine.Random.InitState(unchecked((int) DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds));
+            for (int i = 1; i < RoomIdLength; i++) {
+                idBuilder.Append(RoomIdValidChars[UnityEngine.Random.Range(0, RoomIdValidChars.Length)]);
+            }
+
+            args.RoomName = idBuilder.ToString();
+            args.Lobby = TypedLobby.Default;
+            args.RoomOptions.PublishUserId = true;
+            args.RoomOptions.CustomRoomProperties = DefaultRoomProperties;
+            args.RoomOptions.CustomRoomProperties[Enums.NetRoomProperties.HostName] = Settings.Instance.generalNickname;
+            args.RoomOptions.CustomRoomPropertiesForLobby = DefaultRoomProperties.Keys.ToArray();
+
+            Debug.Log($"[Network] Creating a game in {Region} with the ID {idBuilder}");
+            short response = await Client.CreateAndJoinRoomAsync(args, false);
+
+            if (response == 0) {
+                Debug.Log($"[Network] Successfully created a game with ID {idBuilder}");
+            } else {
+                string responseAsString = RealtimeErrorCodeNames.GetValueOrDefault(response, "Unknown Error");
+                Debug.LogWarning($"[Network] Failed to create a game with ID {idBuilder} with error code {response} ({responseAsString})");
+            }
+            return response;
+        }
+
+        public static bool IsValidRoomId(string id, out int regionIndex) {
+            if (id.Length <= 0) {
+                regionIndex = -1;
+                return false;
+            }
+            id = id.ToUpper();
+            regionIndex = RoomIdValidChars.IndexOf(id[0]);
+            return regionIndex >= 0 && regionIndex < Regions.Count() && Regex.IsMatch(id, $"[{RoomIdValidChars}]{{{RoomIdLength}}}");
+        }
+
+        public static async Task<short> JoinRoom(EnterRoomArgs args) {
+            // Change to region if we need to
+            Debug.Log($"[Network] Attempting to join a game with the ID {args.RoomName}");
+
+            args.RoomName = args.RoomName.ToUpper();
+            if (!await ConnectToRoomsRegion(args.RoomName)) {
+                Debug.Log($"[Network] Failed to change regions- abandoning joining game with ID {args.RoomName}");
+            }
+
+            return await Client.JoinRoomAsync(args, false);
+        }
+
+        private unsafe void UpdateRealtimeProperties() {
+            if (!realtimeClient.InRoom) {
+                return;
+            }
+
+            Frame f = Game.Frames.Predicted;
+            PlayerRef host = f.Global->Host;
+            if (!Game.PlayerIsLocal(host)) {
+                return;
+            }
+
+            ref GameRules rules = ref f.Global->Rules;
+            IntegerProperties intProperties = new() {
+                StarRequirement = rules.StarsToWin,
+                CoinRequirement = rules.CoinsForPowerup,
+                Lives = rules.Lives,
+                Timer = rules.TimerMinutes,
+            };
+            BooleanProperties boolProperties = new() {
+                GameStarted = f.Global->GameState != GameState.PreGameRoom,
+                CustomPowerups = rules.CustomPowerupsEnabled,
+                Teams = rules.TeamsEnabled,
+                DrawOnTimeUp = rules.DrawOnTimeUp,
+                AddonsEnabled = GlobalController.Instance.addonManager.LoadedAddons.Count > 0
+            };
+
+            string stageGuid;
+            if (f.Global->GameState == GameState.PreGameRoom) {
+                if (f.Global->Rules.ChooseMode == StageChooseMode.Random) {
+                    stageGuid = "random";
+                } else {
+                    stageGuid = f.Global->Rules.Stage.Id.ToString();
+                }
+            } else {
+                stageGuid = f.MapAssetRef.Id.ToString();
+            }
+
+            RuntimePlayer hostData = f.GetPlayerData(host);
+            Client.CurrentRoom.SetCustomProperties(new PhotonHashtable {
+                [Enums.NetRoomProperties.IntProperties] = (int) intProperties,
+                [Enums.NetRoomProperties.BoolProperties] = (int) boolProperties,
+                [Enums.NetRoomProperties.HostName] = hostData?.PlayerNickname ?? "noname",
+                [Enums.NetRoomProperties.StageGuid] = stageGuid,
+                [Enums.NetRoomProperties.GamemodeGuid] = rules.Gamemode.Id.ToString(),
+            });
+        }
+
+        public async Task StartQuantum() {
+            Debug.Log("[Network] Starting Quantum Runner");
+            var sessionRunnerArguments = new SessionRunner.Arguments {
+                GameParameters = QuantumRunnerUnityFactory.CreateGameParameters,
+                ClientId = Client.UserId,
+                RuntimeConfig = new RuntimeConfig {
+                    SimulationConfig = QuantumDefaultConfigs.Global.SimulationConfig,
+                    Map = null,
+                    // Seed = unchecked((int) DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                    IsRealGame = true,
+                },
+                SessionConfig = QuantumDeterministicSessionConfigAsset.DefaultConfig,
+                GameMode = DeterministicGameMode.Multiplayer,
+                PlayerCount = Constants.MaxPlayers,
+                Communicator = new QuantumNetworkCommunicator(Client),
+            };
+
+            try {
+                Runner = await QuantumRunner.StartGameAsync(sessionRunnerArguments);
+                Debug.Log("[Network] Quantum Runner started successfully, sending AddPlayer request.");
+                Runner.Game.AddPlayer(new RuntimePlayer {
+                    PlayerNickname = Settings.Instance.generalNickname ?? "noname",
+                    UserId = Client.UserId,
+                    UseColoredNickname = Settings.Instance.generalUseNicknameColor,
+                    Character = Settings.Instance.generalCharacter,
+                    Palette = Settings.Instance.generalPalette,
+                });
+            } catch (Exception e) {
+                Debug.Log($"[Network] Failed to start Quantum Runner with thrown exception: {e.Message}. Qutiting game.");
+                Debug.LogError(e);
+                ThrowError("ui.error.corrupt", false);
+            }
+        }
+
+        public void OnFriendListUpdate(List<FriendInfo> friendList) { }
+
+        public void OnCreatedRoom() { }
+
+        public void OnCreateRoomFailed(short returnCode, string message) { }
+
+        public void OnJoinedRoom() {
+            if (pingUpdateCoroutine != null) {
+                StopCoroutine(pingUpdateCoroutine);
+            }
+            pingUpdateCoroutine = StartCoroutine(PingUpdateCoroutine());
+
+            if (Client.CurrentRoom.PlayerCount == 1 || !GlobalController.Instance.addonManager.isActiveAndEnabled) {
+                _ = StartQuantum();
+            } else {
+                // Don't start quantum immediately,
+                // Wait for the room list event instead.
+            }
+        }
+
+        public void OnJoinRoomFailed(short returnCode, string message) {
+            Debug.Log($"[Network] Failed to join room: ({returnCode}) {message}");
+
+            if (!RealtimeErrorCodes.TryGetValue(returnCode, out string errorTranslationKey)) {
+                errorTranslationKey = $"{message} ({returnCode})";
+            }
+
+            ThrowError(errorTranslationKey, true);
+        }
+
+        public static void ThrowError(string key, bool network) {
+            if (Runner && Runner.IsRunning) {
+                Runner.Shutdown(ShutdownCause.NetworkError);
+            }
+            OnError?.Invoke(key, network);
+        }
+
+        public void OnJoinRandomFailed(short returnCode, string message) { }
+
+        public void OnLeftRoom() {
+            if (pingUpdateCoroutine != null) {
+                StopCoroutine(pingUpdateCoroutine);
+                pingUpdateCoroutine = null;
+            }
+        }
+
+        private unsafe void OnLocalPlayerAddConfirmed(CallbackLocalPlayerAddConfirmed e) {
+            Frame f = e.Frame;
+            RuntimePlayer player = f.GetPlayerData(e.Player);
+            if (player == null) {
+                // ??? Idk how, but this was null *sometimes*.
+                // I think I fixed it by changing `Frame f = e.Game.Frames.Predicted;`
+                // to `Frame f = e.Frame` but I'm not 100% sure. So if-checking just to be safe.
+                return;
+            }
+
+            var bans = f.ResolveList(f.Global->BannedPlayerIds);
+            foreach (var ban in bans) {
+                if (ban.MatchesPlayer(player)) {
+                    // We're banned...
+                    QuantumRunner.Default.Shutdown(ShutdownCause.Ok);
+                    ThrowError("ui.error.join.banned", true);
+                    return;
+                }
+            }
+
+            Debug.Log($"[Network] AddPlayer confirmed on Frame {e.Frame.Number}, {e.Player} with slot {e.PlayerSlot}");
+        }
+
+        private void OnLocalPlayerAddFailed(CallbackLocalPlayerAddFailed e) {
+            Debug.LogWarning($"[Network] AddPlayer failed for slot {e.PlayerSlot}, error: {e.Message}");
+        }
+
+        private void OnChecksumError(CallbackChecksumError e) {
+            Debug.LogError($"[[ CHECKSUM ERROR DETECTED ON TICK {e.Error.Tick}!!! ]]\nChecksums per client:\n{string.Join('\n', e.Error.Checksums.Select(ce => ce.Client + ": " + ce.Checksum))}");
+            StringBuilder sb = new();
+            sb.Append($"Checksums per client:\n{string.Join('\n', e.Error.Checksums.Select(ce => ce.Client + ": " + ce.Checksum))}");
+            sb.AppendLine();
+            for (int i = 0; i < e.FrameCount; i++) {
+                sb.Append("Frame info ").Append(i + 1).AppendLine(":");
+                sb.AppendLine(e.Frames[i].DumpFrame());
+                sb.AppendLine();
+                sb.AppendLine(Convert.ToBase64String(e.Frames[i].Serialize(DeterministicFrameSerializeMode.Serialize)));
+                sb.AppendLine();
+                sb.AppendLine("-----");
+            }
+
+            string result = sb.ToString();
+            UnityWebRequest.Post($"https://mariovsluigi.azurewebsites.net/desync?roomId={Client.CurrentRoom.Name}&actorId={Client.LocalPlayer.ActorNumber}", result, "application/text");
+
+            try {
+                string path = Path.Combine(Application.persistentDataPath, "dumps", DateTimeOffset.Now.ToUnixTimeMilliseconds().ToString() + ".framedump");
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, result);
+            } catch {
+                Debug.LogError(e);
+            }
+
+            StartCoroutine(AutoDisconnectAfterSeconds(10f));
+        }
+
+        private IEnumerator AutoDisconnectAfterSeconds(float seconds) {
+            yield return new WaitForSecondsRealtime(seconds);
+            Runner.Shutdown(ShutdownCause.NetworkError);
+            ThrowError("A desync was detected in the previous game. The game was automatically aborted.\nPlease send your player.log file in the #technical-support channel within the Mario vs Luigi Online Discord and ping @ipodtouch0218.", false);
+        }
+
+        private void OnPluginDisconnect(CallbackPluginDisconnect e) {
+            Debug.Log($"[Network] Disconnected via server plugin: {e.Reason}");
+
+            ThrowError(e.Reason, true);
+
+            if (Runner) {
+                Runner.Shutdown(ShutdownCause.NetworkError);
+            }
+        }
+
+        private void OnHostChanged(EventHostChanged e) {
+            UpdateRealtimeProperties();
+        }
+
+        private void OnRulesChanged(EventRulesChanged e) {
+            UpdateRealtimeProperties();
+        }
+
+        private void OnPlayerKickedFromRoom(EventPlayerKickedFromRoom e) {
+            if (e.Game.PlayerIsLocal(e.Player)) {
+                Runner.Shutdown(ShutdownCause.Ok);
+            }
+        }
+
+        private void OnPlayerAdded(EventPlayerAdded e) {
+            if (ActiveReplayManager.Instance.IsReplay) {
+                return;
+            }
+            
+            Frame f = e.Game.Frames.Predicted;
+            RuntimePlayer runtimePlayer = f.GetPlayerData(e.Player);
+
+            Debug.Log($"[Network] {runtimePlayer.PlayerNickname} ({runtimePlayer.UserId}) joined the game.");
+        }
+
+        private void OnPlayerRemoved(EventPlayerRemoved e) {
+            if (ActiveReplayManager.Instance.IsReplay) {
+                return;
+            }
+
+            Frame f = e.Game.Frames.Predicted;
+            RuntimePlayer runtimePlayer = f.GetPlayerData(e.Player);
+
+            Debug.Log($"[Network] {runtimePlayer.PlayerNickname} ({runtimePlayer.UserId}) left the game.");
+        }
+
+        private void OnGameStateChanged(EventGameStateChanged e) {
+            UpdateRealtimeProperties();
+            QuantumRunner.Default.Session.MaxVerifiedTicksPerUpdate = e.NewState == GameState.Playing ? 8 : int.MaxValue;
+        }
+
+        private unsafe void OnGameStarted(CallbackGameStarted e) {
+            Frame f = e.Game.Frames.Verified;
+            var bans = f.ResolveList(f.Global->BannedPlayerIds);
+            foreach (var ban in bans) {
+                if (ban.UserId == Client.UserId) {
+                    QuantumRunner.Default.Shutdown(ShutdownCause.Ok);
+                    ThrowError("ui.error.join.banned", true);
+                    return;
+                }
+            }
+        }
+
+        public void OnConnected() { }
+
+        public void OnConnectedToMaster() { }
+
+        public void OnDisconnected(DisconnectCause cause) {
+            Debug.Log($"[Network] Disconnected. Reason: {cause}");
+
+            if (Runner) {
+                Runner.Shutdown(ShutdownCause.NetworkError);
+            }
+            if (RealtimeDisconnectCauses.TryGetValue(cause, out string key)) {
+                ThrowError(key, true);
+            }
+        }
+
+        public void OnRegionListReceived(RegionHandler regionHandler) { }
+
+        public void OnCustomAuthenticationResponse(Dictionary<string, object> data) {
+            PlayerPrefs.SetString("id", Client.AuthValues.UserId);
+
+            if (data.TryGetValue("Token", out object token) && token is string tokenString) {
+                PlayerPrefs.SetString("token", tokenString);
+            }
+
+            PlayerPrefs.Save();
+        }
+
+        public void OnCustomAuthenticationFailed(string debugMessage) { }
+    }
+}
