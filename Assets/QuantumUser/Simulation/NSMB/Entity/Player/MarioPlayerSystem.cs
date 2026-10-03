@@ -1511,8 +1511,8 @@ namespace Quantum {
                     return;
                 }
 
-                if (activeProjectiles < 2) {
-                    // Always allow if < 2
+                if (activeProjectiles < projectileAsset.ProjectileVolleySize) {
+                    // Always allow if < ProjectileVolleySize
                     mario->CurrentVolley = (byte) (activeProjectiles + 1);
                 } else if (mario->CurrentVolley < projectileAsset.ProjectileVolleySize) {
                     // Allow in this volley
@@ -2220,6 +2220,14 @@ namespace Quantum {
                         mario->Powerdown(f, marioEntity, false, projectileEntity);
                     } else {
                         didKnockback = mario->DoKnockback(f, marioEntity, !projectile->FacingRight, dropStars ? 1 : 0, KnockbackStrength.FireballBump, projectile->Owner);
+                    }
+                    break;
+                case ProjectileEffectType.Boomerang:
+                    // Same effect except it's based off it's X velocity
+                    if (dropStars && mario->CurrentPowerupState == PowerupState.MiniMushroom) {
+                        mario->Powerdown(f, marioEntity, false, projectileEntity);
+                    } else {
+                        didKnockback = mario->DoKnockback(f, marioEntity, projectilePhysics->Velocity.X < 0, dropStars ? 1 : 0, KnockbackStrength.FireballBump, projectile->Owner);
                     }
                     break;
                 case ProjectileEffectType.Freeze:
