@@ -38,7 +38,7 @@ MonoBehaviour:
       RawValue: 110100
   MaxMatchingPowerStates: 1
   MaxMatchingReserveState: 0
-  State: 8
+  State: 9
   SoundPlaysEverywhere: 0
   SoundEffect: 40
   ReserveSprite: {fileID: -1604689058, guid: a87d3b028baa82640b06b88398a8c4f0, type: 3}
@@ -80,6 +80,9 @@ MonoBehaviour:
   ItemPriority: 4
   EnterReserveIfOverridden: 1
   Instant: 1
+  ProjectileAsset:
+    Id:
+      Value: 0
   SfxOverrides: []
   GrowAnimationDuration:
     RawValue: 98304
