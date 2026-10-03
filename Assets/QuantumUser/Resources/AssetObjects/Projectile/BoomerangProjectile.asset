@@ -40,5 +40,5 @@ MonoBehaviour:
   ProjectileDelayFrames: 6
   ProjectileVolleyFrames: 75
   DestroyParticleEffect: 8
-  ShootSound: 122
+  ShootSound: 121
   SfxOverrides: []
